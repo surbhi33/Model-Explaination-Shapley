@@ -1,0 +1,321 @@
+##AWSconnect#####
+rm(list=ls())
+gc()
+get_redshift_conection<-function(PATH_JAR){
+  library(data.table)
+  #####Connecting to Redshift#######
+  options(java.parameters = "-Xmx1900g")
+  
+  Req_pkgs_redshift<-c("RJDBC","data.table")
+  pkgs_unistalled<-setdiff(Req_pkgs_redshift,rownames(installed.packages()))
+  if(length(pkgs_unistalled)>0){install.packages(pkgs_unistalled)}
+  library(RJDBC)
+  library(data.table)
+  library(RJDBC)
+  #PATH_JAR   <- PATH_JAR_d_drive
+  Driver     <- JDBC("com.amazon.redshift.jdbc42.Driver", PATH_JAR,identifier.quote="`")
+
+
+get_data_to_VAR_x_PAT<-function(TABLE){
+  TABLE_VARxPAT <- transpose(TABLE)
+  
+  colnames(TABLE_VARxPAT) <- as.character(TABLE$patient_id)
+  index_pat_id<- which(colnames(TABLE)=="patient_id")
+  
+  TABLE_VARxPAT<-TABLE_VARxPAT[-index_pat_id,] 
+  TABLE_VARxPAT[,(colnames(TABLE_VARxPAT)):=lapply(.SD,as.numeric),.SDcols=colnames(TABLE_VARxPAT)]
+  TABLE_VARxPAT<-data.table(variable_names= colnames(TABLE)[-index_pat_id],TABLE_VARxPAT)
+  return(TABLE_VARxPAT)
+}
+
+#location to driver (JAR file ) : connect to redshift 
+
+
+get_redshift_conection(PATH_JAR_shared_drive)
+
+
+
+RHS_TABLE_NAME<-"cdr_la_rs.AI_ML_LOOKALIKE_MODEL___04052020"
+LHS_TABLE_NAME<-"cdr_la_rs.AI_ML_LOOKALIKE_MODEL_oral___22042020"
+
+
+
+
+#~21K
+RHS_PATIENT_COUNT<-dbGetQuery(AWSConnect,paste("select count(distinct patient_id) from ", RHS_TABLE_NAME, sep=""))
+
+#~1.8M
+LHS_PATIENT_COUNT<-dbGetQuery(AWSConnect,paste("select count(distinct patient_id) from ", LHS_TABLE_NAME, sep=""))
+##get data from redshift #####
+
+patient_chunk <- floor(LHS_PATIENT_COUNT/5)
+
+#install.packages("doParallel")
+
+library(doParallel)
+stopCluster(cl)
+cl<-makeCluster(6)
+registerDoParallel(cl)
+
+t1<-Sys.time()
+get_data<-foreach(i=1:(5+1),.verbose = T)%dopar%{
+  
+  
+  get_redshift_conection(PATH_JAR_d_drive)
+  library(data.table)
+  print(i)
+  
+  pat1      <- (i-1)*patient_chunk$count+1
+  pat2      <- i*patient_chunk$count
+  pat_in    <- pat1:pat2
+  query     <- paste("select * from ", LHS_TABLE_NAME, " where row_number >=", pat1,"and row_number <= ", pat2,sep=" ")
+  LHS_TABLE <- as.data.table(dbGetQuery(AWSConnect,query))
+  LHS_TABLE[,row_number:=NULL]
+  
+  #  LHS_TABLE_VARxPAT<-get_data_to_VAR_x_PAT(LHS_TABLE)
+  
+  return(LHS_TABLE)
+  
+  
+}
+
+t2<-Sys.time()-t1
+stopCluster(cl)
+
+Patient_ID_RHS_jul_aug_SEP_19<-dbGetQuery(AWSConnect,"select * from cdr_la_rs.cns_lookalike_model_1_jul_aug_sep")
+str(get_data[[6]])
+LHS_TABLE_PATxVAR <- rbindlist(get_data)
+LHS_table_class   <- sapply(LHS_TABLE_PATxVAR,class)
+names(LHS_table_class)[LHS_table_class=="character"]
+dim(LHS_TABLE_PATxVAR)
+# RF random iteration 
+random <- unique(floor(runif(n = 300000,min = 1,max=nrow(LHS_TABLE_PATxVAR))))[1:90000]
+LHS_RANDOM_PATIENT_ID<- LHS_TABLE_PATxVAR$patient_id[random]
+length(LHS_RANDOM_PATIENT_ID)
+
+for (j in seq_len(ncol(LHS_TABLE_PATxVAR)))
+  set(LHS_TABLE_PATxVAR,which(is.na(LHS_TABLE_PATxVAR[[j]])),j,0)
+
+class(LHS_TABLE_PATxVAR$patient_id); 
+LHS_TABLE_PATxVAR<-LHS_TABLE_PATxVAR[patient_id %in% as.character(LHS_RANDOM_PATIENT_ID),]
+dim(LHS_TABLE_PATxVAR)
+fwrite(LHS_TABLE_PATxVAR,"D:\\__Lookalike_data\\LHS_TABLE_PATxVAR_24_April.csv")
+
+###RHS_TABLE
+RHS_TABLE <- as.data.table(dbGetQuery(AWSConnect,paste("select * from ", RHS_TABLE_NAME,sep="")))
+RHS_TABLE[,row_number:=NULL]
+
+for (j in seq_len(ncol(RHS_TABLE)))
+  set(RHS_TABLE,which(is.na(RHS_TABLE[[j]])),j,0)
+fwrite(RHS_TABLE,"D:\\__Lookalike_data1\\RHS__.CSV")
+RHS_TABLE<- RHS_TABLE[patient_id %in% Patient_ID_RHS_jul_aug_SEP_19$patient_id, ]
+length(Patient_ID_RHS_jul_aug_SEP_19$patient_id)
+dim(RHS_TABLE)
+
+########################################################################################################
+#LHS_PATEINT_ID<- dbGetQuery(AWSConnect,"select * from cdr_la_rs.ai_ml_intmd_selected_lhs_oral___bp_list_new_01052020 ")
+#LHS_PATEINT_ID<- dbGetQuery(AWSConnect,"select * from cdr_la_rs.ai_ml_intmd_selected_lhs_oral___list ")
+LHS_PATEINT_ID<- dbGetQuery(AWSConnect,"select * from cdr_la_rs.ai_ml_intmd_selected_lhs_oral_____list ")
+
+#RHS_PATEINT_ID<- dbGetQuery(AWSConnect,"select * from cdr_la_rs.ai_ml_intmd_selected_rhs___bp_list_new_01052020")
+#RHS_PATEINT_ID<- dbGetQuery(AWSConnect,"select * from cdr_la_rs.ai_ml_intmd_selected_rhs___overall_list_new_04052020    ")
+RHS_PATEINT_ID<- dbGetQuery(AWSConnect,"select * from cdr_la_rs.ai_ml_intmd_selected_rhs___overall_list_05052020")
+
+LHS_TABLE_PATxVAR<-fread("D:\\__Lookalike_data1\\LHS_TABLE_PATxVAR_ORAL___24_April.csv")
+#list.files("D:\\__Lookalike_data")
+#RHS_TABLE<- fread("D:\\__Lookalike_data1\\RHS_TABLE_24_APRIL.csv")
+RHS_TABLE<- fread("D:\\__Lookalike_data1\\RHS__.CSV")
+
+
+####################################################################################
+LHS_TABLE_PATxVAR<- LHS_TABLE_PATxVAR[as.character(patient_id) %in% LHS_PATEINT_ID$patient_id,]
+dim(LHS_TABLE_PATxVAR); length( LHS_PATEINT_ID$patient_id)
+
+random <- unique(floor(runif(n = 2000000,min = 1,max=nrow(LHS_TABLE_PATxVAR))))[1:100000]
+LHS_RANDOM_PATIENT_ID<- LHS_TABLE_PATxVAR$patient_id[random]
+length(LHS_RANDOM_PATIENT_ID)
+
+LHS_TABLE_PATxVAR<- LHS_TABLE_PATxVAR[patient_id %in% LHS_RANDOM_PATIENT_ID,]
+
+RHS_TABLE<- RHS_TABLE[as.character(patient_id) %in% RHS_PATEINT_ID$patient_id,]
+dim(RHS_TABLE); length( RHS_PATEINT_ID$patient_id)
+
+LHS_TABLE_PATxVAR[,y:=0]
+
+RHS_TABLE[,y:=1]
+RHS_TABLE[,__min_date:=NULL]
+RHS_TABLE[,__min_date:=NULL]
+setdiff(colnames(RHS_TABLE), colnames(LHS_TABLE_PATxVAR))
+remove_var<-setdiff(colnames(LHS_TABLE_PATxVAR), colnames(RHS_TABLE))
+common_var<-intersect(colnames(LHS_TABLE_PATxVAR), colnames(RHS_TABLE))
+
+learning_set<-rbindlist(list(LHS_TABLE_PATxVAR[,common_var,with=F],RHS_TABLE[,common_var,with=F]), use.names=TRUE)
+fwrite(learning_set,"D:\\_ Segmentation\\Surbhi\\_ Lookalike results\\Modelling_Universe_lookalike_patient_model___shap_data.csv")
+#learning_set<-fread("D:\\_ Segmentation\\Surbhi\\_ Lookalike results\\Modelling_Universe_lookalike_patient_model___shap_data.csv")
+
+dim(learning_set)
+colnames(learning_set)[which(colnames(learning_set)=="y")]<-"FLAG"
+
+
+
+
+y<-"FLAG"
+x<-setdiff(colnames(learning_set),c("patient_id",y))
+
+
+
+length(intersect(colnames(learning_set),x))
+
+library(data.table)
+learning_set_trial<- learning_set[, c(x,"patient_id","FLAG"), with=FALSE]
+
+tempdir()
+class(learning_set_trial)
+dim(learning_set_trial)
+setwd("D:\\r-temp")
+install.packages("h2o")
+lib.loc = "D:\\r-temp"
+library(h2o)
+options("h2o.use.data.table"=TRUE)
+h2o.shutdown(prompt=F)
+h2o.init(nthreads=-1,port=520)
+
+
+#write("TMP = 'D:/r-temp'", file=file.path(Sys.getenv('R_USER'), '.Renviron'))
+
+
+learning_set_trial[,FLAG:=as.factor(FLAG)]
+dim(learning_set_trial)
+learning_set_h2o <- as.h2o(learning_set_trial)
+
+h2o.levels(learning_set_h2o[,"FLAG"])
+split_h2o<-h2o.splitFrame(data = learning_set_h2o, ratios = .75)
+
+train <-split_h2o[[1]]
+
+dim(train)
+colnames(train)
+test  <-split_h2o[[2]]
+h2o.asfactor(learning_set_h2o[,"FLAG"])
+dim(train);dim(test)
+
+random_forest <- h2o.randomForest(x,y,train,
+                                  #nfolds = 3,
+                                  ntrees = 300,
+                                  min_rows = 100,
+                                  # mtries =50,
+                                  sample_rate=0.63,
+                                  max_depth = 20,
+                                  verbose = T,
+                                  balance_classes = F,
+                                  #class_sampling_factors  = c(0.25,1),
+                                  seed=123)
+
+#7:30am to 4:50 am
+# ntrees 300; same seed 
+variable_importance <- h2o.varimp(random_forest)
+View(variable_importance)
+
+test_model<-h2o.performance(random_forest,newdata = test)
+test_model@metrics$max_criteria_and_metric_scores
+path<-"D:\\_ Segmentation\\Surbhi\\"
+dir.create(paste(path,"\\Refreshed Overall Lookalike Result",sep=""))
+dir.create(paste(path,"\\Refreshed Overall Lookalike Result\\results",sep=""))
+result_path<-paste(path,"\\Refreshed Overall Lookalike Result\\results",sep="")
+fwrite(test_model@metrics$max_criteria_and_metric_scores,paste(result_path,"\\test.csv",sep=""))
+fwrite(test_model@metrics$cm$table,paste(result_path,"\\cm_test.csv",sep=""))
+train_metric<-random_forest@model$training_metrics@metrics$max_criteria_and_metric_scores
+fwrite(train_metric,paste(result_path,"\\train.csv",sep=""))
+
+test_result<-h2o.predict(random_forest,learning_set_h2o[as.character(learning_set_h2o$FLAG)=="0",])
+View(head(test_result))
+
+test_result_combined<- data.frame(Patient_ID= as.vector(learning_set_h2o[as.character(learning_set_h2o$FLAG)=="0",]$patient_id),as.data.frame(test_result))
+
+setDT(test_result_combined)
+setorder(test_result_combined,-p1)
+View(head(test_result_combined))
+
+#fwrite(test_result_combined,"e:/CNS_LOOKALIKE_MODEL_1/prediction_cns_lookalike_model_1_261_full_data_20thfeb.csv")
+
+dir.create(paste(path,"\\Refreshed Overall Lookalike Result\\Model",sep=""))
+h2o.saveModel(random_forest,paste(path,"\\Refreshed Overall Lookalike Result\\Model",sep=""))
+
+fwrite(variable_importance,paste(result_path,"\\variable_importance.csv",sep=""))
+variable_importance<-fread(paste(result_path,"\\variable_importance.csv",sep=""))
+random_forest<-h2o.loadModel(paste(path,"Refreshed Overall Lookalike Result\\Model\\","DRF_model_R_1588850366989_1",sep=""))
+#---------------------------------************ SHAP 
+t1<-Sys.time()
+SHAP_MATRIX<- h2o.predict_contributions(random_forest,learning_set_h2o)
+t2=Sys.time()-t1
+t2
+dim(learning_set_h2o)
+colnames(SHAP_MATRIX)
+View(head(SHAP_MATRIX))
+
+t3<-Sys.time()
+MEAN_ABS_SHAP<- sapply(as.data.table(SHAP_MATRIX), function(x)mean(abs(x)))
+MEAN_ABS_SHAP_dt<-data.table(variable_names=names(MEAN_ABS_SHAP),Mean_absolute_shap=MEAN_ABS_SHAP)
+t4=Sys.time()-t3
+t4
+
+SHAP_MATRIX_DT<- as.data.frame(SHAP_MATRIX)
+
+setDT(SHAP_MATRIX_DT)
+dim(SHAP_MATRIX_DT)
+
+SHAP_MATRIX_DT_WITH_Y<- SHAP_MATRIX_DT[,y:=as.character(learning_set_trial$FLAG)]
+
+Mean_SHAP_X<-SHAP_MATRIX_DT_WITH_Y[,lapply(.SD,mean),by=y,.SDcols=variable_importance$variable]
+Mean_SHAP_X_t<-t(Mean_SHAP_X)
+
+Mean_SHAP_X_dt <- data.table( variable_names=rownames(Mean_SHAP_X_t), Mean_SHAP_y_0=Mean_SHAP_X_t[,1],Mean_SHAP_y_1=Mean_SHAP_X_t[,2] )
+
+Mean_Actual_x<- learning_set_trial[,lapply(.SD,mean),by=y,.SDcols=variable_importance$variable]
+Mean_Actual_x_t<-t(Mean_Actual_x)
+
+Mean_Actual_x_dt<- data.table(variable_names=rownames(Mean_Actual_x_t), Mean_Actual_x_y_0=Mean_Actual_x_t[,1], Mean_Actual_x_y_1=Mean_Actual_x_t[,2])
+
+
+
+i=1
+Regeression_summary<-list()
+for ( var in variable_importance$variable){
+  
+  shap_x<- SHAP_MATRIX_DT[[var]]
+  Actual_x<- learning_set_trial[[var]]
+  reg<-lm(shap_x~ 1+Actual_x)
+  reg_summary<-summary(reg)
+  coef<-reg_summary$coefficients
+  t_value<- coef[which(rownames(coef)=="Actual_x"),c("t value") ]
+  p_value<- coef[which(rownames(coef)=="Actual_x"),c("Pr(>|t|)") ]
+  estimate<-coef[which(rownames(coef)=="Actual_x"),c("Estimate") ] 
+  adj_r_square<- reg_summary$adj.r.squared
+  
+  Regeression_summary[[i]]<- data.table(variable_name=var,
+                                        direction=estimate,
+                                        t_value=t_value,p_value=p_value, 
+                                        adjusted_r_sq=adj_r_square)
+  
+  i=i+1
+}
+
+Regeression_summary_DT<- rbindlist(Regeression_summary)
+
+colnames(Regeression_summary_DT)[1]<-"variable_names"
+
+colnames(variable_importance)[1]<-"variable_names"
+
+All_RESULT<- Reduce(function(x,y)merge(x,y,by="variable_names"),list(variable_importance,
+                                                                     Mean_Actual_x_dt,
+                                                                     Mean_SHAP_X_dt,
+                                                                     MEAN_ABS_SHAP_dt,Regeression_summary_DT))
+
+
+
+View(All_RESULT)
+
+
+list.dirs("e:/")
+fwrite(All_RESULT,paste(result_path,"\\SHAP_DRIVER.csv",sep=""))
+beepr::beep(sound=5)
